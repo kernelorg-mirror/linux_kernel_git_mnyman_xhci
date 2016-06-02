@@ -3670,22 +3670,23 @@ static int xhci_get_isoc_frame_id(struct xhci_hcd *xhci,
 			ret = -EINVAL;
 	}
 
+	if (ret) {
+		xhci_warn(xhci, "Frame ID %d (reg %d, index %d) beyond range (%d, %d)\n",
+			  start_frame, current_frame_id, index,
+			  start_frame_id, end_frame_id);
+	}
 	if (index == 0) {
-		if (ret == -EINVAL || start_frame == start_frame_id) {
+		if (ret == -EINVAL || start_frame == start_frame_id)
 			start_frame = start_frame_id + 1;
-			if (urb->dev->speed == USB_SPEED_LOW ||
-					urb->dev->speed == USB_SPEED_FULL)
-				urb->start_frame = start_frame;
-			else
-				urb->start_frame = start_frame << 3;
-			ret = 0;
-		}
+		if (urb->dev->speed == USB_SPEED_LOW ||
+		    urb->dev->speed == USB_SPEED_FULL)
+			urb->start_frame = start_frame;
+		else
+			urb->start_frame = start_frame << 3;
+		ret = 0;
 	}
 
 	if (ret) {
-		xhci_warn(xhci, "Frame ID %d (reg %d, index %d) beyond range (%d, %d)\n",
-				start_frame, current_frame_id, index,
-				start_frame_id, end_frame_id);
 		xhci_warn(xhci, "Ignore frame ID field, use SIA bit instead\n");
 		return ret;
 	}
@@ -3710,7 +3711,7 @@ static int xhci_queue_isoc_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	int i, j;
 	bool more_trbs_coming;
 	struct xhci_virt_ep *xep;
-	int frame_id;
+	int frame_id = -EINVAL;
 
 	xep = &xhci->devs[slot_id]->eps[ep_index];
 	ep_ring = xhci->devs[slot_id]->eps[ep_index].ring;
@@ -3759,12 +3760,12 @@ static int xhci_queue_isoc_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 
 		/* use SIA as default, if frame id is used overwrite it */
 		sia_frame_id = TRB_SIA;
-		if (!(urb->transfer_flags & URB_ISO_ASAP) &&
-		    HCC_CFC(xhci->hcc_params)) {
+		if (!(urb->transfer_flags & URB_ISO_ASAP)) {
 			frame_id = xhci_get_isoc_frame_id(xhci, urb, i);
 			if (frame_id >= 0)
 				sia_frame_id = TRB_FRAME_ID(frame_id);
 		}
+
 		/*
 		 * Set isoc specific data for the first TRB in a TD.
 		 * Prevent HW from getting the TRBs by keeping the cycle state
@@ -3947,6 +3948,14 @@ int xhci_queue_isoc_tx_prepare(struct xhci_hcd *xhci, gfp_t mem_flags,
 			urb->interval /= 8;
 	}
 
+	/*
+	 * if urb->start_frame is set by a class driver, note that we consider
+	 * start_frame 0 invalid here
+	 */
+
+	if ((urb->start_frame) && !(urb->transfer_flags & URB_ISO_ASAP))
+		goto skip_start_over;
+
 	/* Calculate the start frame and put it in urb->start_frame. */
 	if (HCC_CFC(xhci->hcc_params) && !list_empty(&ep_ring->td_list)) {
 		if ((le32_to_cpu(ep_ctx->ep_info) & EP_STATE_MASK) ==
@@ -3955,7 +3964,6 @@ int xhci_queue_isoc_tx_prepare(struct xhci_hcd *xhci, gfp_t mem_flags,
 			goto skip_start_over;
 		}
 	}
-
 	start_frame = readl(&xhci->run_regs->microframe_index);
 	start_frame &= 0x3fff;
 	/*
