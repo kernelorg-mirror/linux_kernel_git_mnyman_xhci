@@ -1921,6 +1921,9 @@ static void xhci_zero_in_ctx(struct xhci_hcd *xhci, struct xhci_virt_device *vir
 	}
 }
 
+static int xhci_get_port_bandwidth(struct xhci_hcd *xhci,
+				   struct usb_device *udev);
+
 static int xhci_configure_endpoint_result(struct xhci_hcd *xhci,
 		struct usb_device *udev, u32 *cmd_status)
 {
@@ -1944,6 +1947,7 @@ static int xhci_configure_endpoint_result(struct xhci_hcd *xhci,
 			 "Not enough bandwidth for new device state.\n");
 		ret = -ENOSPC;
 		/* FIXME: can we go back to the old state? */
+		xhci_get_port_bandwidth(xhci, udev);
 		break;
 	case COMP_TRB_ERROR:
 		/* the HCD set up something wrong */
@@ -2810,6 +2814,57 @@ static void xhci_check_bw_drop_ep_streams(struct xhci_hcd *xhci,
 		ep->stream_info = NULL;
 		ep->ep_state &= ~EP_HAS_STREAMS;
 	}
+}
+
+static int xhci_get_port_bandwidth(struct xhci_hcd *xhci,
+				   struct usb_device *udev)
+{
+	struct device *dev = xhci_to_hcd(xhci)->self.sysdev;
+	struct xhci_command *command;
+	dma_addr_t dma;
+	unsigned int i;
+	char *ctx;
+	unsigned int hub_slot_id = 0;
+	unsigned int dev_speed =
+		udev->speed == USB_SPEED_HIGH ? 0x3 :
+		udev->speed == USB_SPEED_SUPER ? 0x4 :
+		0x0;
+	unsigned long flags;
+	int ret = 0;
+	unsigned int max_ports;
+
+	command = xhci_alloc_command(xhci, true, GFP_KERNEL);
+	if (!command)
+		return -ENOMEM;
+
+	max_ports = HCS_MAX_PORTS(xhci->hcs_params1) + 1;
+	ctx = dma_alloc_coherent(dev, round_up(max_ports, 8), &dma, GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+
+	spin_lock_irqsave(&xhci->lock, flags);
+	ret = xhci_queue_get_port_bandwidth(xhci, command, dma,
+					    hub_slot_id, dev_speed);
+	if (ret) {
+		spin_unlock_irqrestore(&xhci->lock, flags);
+		goto out;
+	}
+
+	xhci_ring_cmd_db(xhci);
+	spin_unlock_irqrestore(&xhci->lock, flags);
+
+	wait_for_completion(command->completion);
+
+	/* Read Bandwidth utilization from Context */
+	for (i = 0; i < max_ports; i++)
+		dev_warn(&udev->dev,
+			 "port %d - available bandwidth: %hhd %%\n", i, ctx[i]);
+
+out:
+	dma_free_coherent(dev, round_up(max_ports, 8), ctx, dma);
+	xhci_free_command(xhci, command);
+
+	return 0;
 }
 
 /* Called after one or more calls to xhci_add_endpoint() or

@@ -1234,6 +1234,7 @@ enum xhci_ep_reset_type {
 
 /* Get Port Bandwidth */
 #define TRB_TO_DEV_SPEED(p)		(((p) & (0xf << 16)) >> 16)
+#define DEV_SPEED_FOR_TRB(p)		(((p) & 0xf) << 16)
 
 /* Force Header */
 #define TRB_TO_PACKET_TYPE(p)		((p) & 0x1f)
@@ -2084,6 +2085,9 @@ int xhci_queue_evaluate_context(struct xhci_hcd *xhci, struct xhci_command *cmd,
 int xhci_queue_reset_ep(struct xhci_hcd *xhci, struct xhci_command *cmd,
 		int slot_id, unsigned int ep_index,
 		enum xhci_ep_reset_type reset_type);
+int xhci_queue_get_port_bandwidth(struct xhci_hcd *xhci,
+		struct xhci_command *cmd, dma_addr_t port_bw_ctx,
+		unsigned int hub_slot_id, unsigned int dev_speed);
 int xhci_queue_reset_device(struct xhci_hcd *xhci, struct xhci_command *cmd,
 		u32 slot_id);
 void xhci_find_new_dequeue_state(struct xhci_hcd *xhci,

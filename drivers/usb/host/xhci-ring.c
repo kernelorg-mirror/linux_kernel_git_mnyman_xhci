@@ -1434,6 +1434,8 @@ static void handle_cmd_completion(struct xhci_hcd *xhci,
 		break;
 	case TRB_EVAL_CONTEXT:
 		break;
+	case TRB_GET_BW:
+		break;
 	case TRB_ADDR_DEV:
 		xhci_handle_cmd_addr_dev(xhci, slot_id);
 		break;
@@ -4065,4 +4067,17 @@ int xhci_queue_reset_ep(struct xhci_hcd *xhci, struct xhci_command *cmd,
 
 	return queue_command(xhci, cmd, 0, 0, 0,
 			trb_slot_id | trb_ep_index | type, false);
+}
+
+int xhci_queue_get_port_bandwidth(struct xhci_hcd *xhci,
+		struct xhci_command *cmd, dma_addr_t port_bw_ctx,
+		unsigned int hub_slot_id, unsigned int dev_speed)
+{
+	u32 trb_slot_id = SLOT_ID_FOR_TRB(hub_slot_id);
+	u32 trb_dev_speed = DEV_SPEED_FOR_TRB(dev_speed);
+
+	return queue_command(xhci, cmd, lower_32_bits(port_bw_ctx),
+			upper_32_bits(port_bw_ctx), 0,
+			trb_slot_id | trb_dev_speed | TRB_TYPE(TRB_GET_BW),
+			false);
 }
