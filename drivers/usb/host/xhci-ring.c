@@ -487,9 +487,20 @@ static u64 xhci_get_hw_deq(struct xhci_hcd *xhci, struct xhci_virt_device *vdev,
 
 	if (ep->ep_state & EP_HAS_STREAMS) {
 		st_ctx = &ep->stream_info->stream_ctx_array[stream_id];
-		return le64_to_cpu(st_ctx->stream_ring);
+		xhci_dbg_trace(xhci, trace_xhci_get_hw_deq,
+			       "ep_index %d stream_id %d deq %016llx\n",
+			       ep_index,
+			       stream_id,
+			       le64_to_cpu(st_ctx->stream_ring));
+
+	return le64_to_cpu(st_ctx->stream_ring);
 	}
 	ep_ctx = xhci_get_ep_ctx(xhci, vdev->out_ctx, ep_index);
+	xhci_dbg_trace(xhci, trace_xhci_get_hw_deq,
+		       "ep_index %d No stream, deq %016llx\n",
+		       ep_index,
+		       le64_to_cpu(ep_ctx->deq));
+
 	return le64_to_cpu(ep_ctx->deq);
 }
 
@@ -764,7 +775,7 @@ static void xhci_handle_cmd_stop_ep(struct xhci_hcd *xhci, int slot_id,
 
 		if ((!ep->stopped_ring || ep->stopped_ring == ep_ring) &&
 		    trb_in_td(xhci, cur_td->start_seg, cur_td->first_trb,
-			       cur_td->last_trb, hw_deq, false)) {
+			       cur_td->last_trb, hw_deq, true)) {
 			xhci_find_new_dequeue_state(xhci, slot_id, ep_index,
 						    cur_td->urb->stream_id,
 						    cur_td, &deq_state);

@@ -37,6 +37,11 @@ DECLARE_EVENT_CLASS(xhci_log_msg,
 	TP_printk("%s", __get_str(msg))
 );
 
+DEFINE_EVENT(xhci_log_msg, xhci_get_hw_deq,
+	TP_PROTO(struct va_format *vaf),
+	TP_ARGS(vaf)
+);
+
 DEFINE_EVENT(xhci_log_msg, xhci_dbg_address,
 	TP_PROTO(struct va_format *vaf),
 	TP_ARGS(vaf)
