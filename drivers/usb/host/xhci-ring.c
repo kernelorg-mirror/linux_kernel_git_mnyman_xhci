@@ -991,13 +991,12 @@ static void update_ring_for_set_deq_completion(struct xhci_hcd *xhci,
 		ep_ring->dequeue = ep_ring->deq_seg->trbs;
 	}
 
-	while (ep_ring->dequeue != dev->eps[ep_index].queued_deq_ptr) {
+	while (ep_ring->dequeue != ep_ring->queued_deq_ptr) {
 		/* We have more usable TRBs */
 		ep_ring->num_trbs_free++;
 		ep_ring->dequeue++;
 		if (trb_is_link(ep_ring->dequeue)) {
-			if (ep_ring->dequeue ==
-					dev->eps[ep_index].queued_deq_ptr)
+			if (ep_ring->dequeue == ep_ring->queued_deq_ptr)
 				break;
 			ep_ring->deq_seg = ep_ring->deq_seg->next;
 			ep_ring->dequeue = ep_ring->deq_seg->trbs;
@@ -1094,8 +1093,8 @@ static void xhci_handle_cmd_set_deq(struct xhci_hcd *xhci, int slot_id,
 		}
 		xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
 			"Successful Set TR Deq Ptr cmd, deq = @%08llx", deq);
-		if (xhci_trb_virt_to_dma(ep->queued_deq_seg,
-					 ep->queued_deq_ptr) == deq) {
+		if (xhci_trb_virt_to_dma(ep_ring->queued_deq_seg,
+					 ep_ring->queued_deq_ptr) == deq) {
 			/* Update the ring's dequeue segment and dequeue pointer
 			 * to reflect the new position.
 			 */
@@ -1104,14 +1103,14 @@ static void xhci_handle_cmd_set_deq(struct xhci_hcd *xhci, int slot_id,
 		} else {
 			xhci_warn(xhci, "Mismatch between completed Set TR Deq Ptr command & xHCI internal state.\n");
 			xhci_warn(xhci, "ep deq seg = %p, deq ptr = %p\n",
-				  ep->queued_deq_seg, ep->queued_deq_ptr);
+				  ep_ring->queued_deq_seg, ep_ring->queued_deq_ptr);
 		}
 	}
 
 cleanup:
 	dev->eps[ep_index].ep_state &= ~SET_DEQ_PENDING;
-	dev->eps[ep_index].queued_deq_seg = NULL;
-	dev->eps[ep_index].queued_deq_ptr = NULL;
+	ep_ring->queued_deq_seg = NULL;
+	ep_ring->queued_deq_ptr = NULL;
 	/* Restart any rings with pending URBs */
 	ring_doorbell_for_active_rings(xhci, slot_id, ep_index);
 }
@@ -4012,6 +4011,7 @@ void xhci_queue_new_dequeue_state(struct xhci_hcd *xhci,
 	u32 type = TRB_TYPE(TRB_SET_DEQ);
 	struct xhci_virt_ep *ep;
 	struct xhci_command *cmd;
+	struct xhci_ring *ep_ring;
 	int ret;
 
 	xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
@@ -4043,8 +4043,10 @@ void xhci_queue_new_dequeue_state(struct xhci_hcd *xhci,
 	if (!cmd)
 		return;
 
-	ep->queued_deq_seg = deq_state->new_deq_seg;
-	ep->queued_deq_ptr = deq_state->new_deq_ptr;
+	ep_ring = xhci_triad_to_transfer_ring(xhci, slot_id,
+					      ep_index, deq_state->stream_id);
+	ep_ring->queued_deq_seg = deq_state->new_deq_seg;
+	ep_ring->queued_deq_ptr = deq_state->new_deq_ptr;
 	if (deq_state->stream_id)
 		trb_sct = SCT_FOR_TRB(SCT_PRI_TR);
 	ret = queue_command(xhci, cmd,

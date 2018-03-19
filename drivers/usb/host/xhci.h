@@ -929,12 +929,6 @@ struct xhci_virt_ep {
 	/* Watchdog timer for stop endpoint command to cancel URBs */
 	struct timer_list	stop_cmd_timer;
 	struct xhci_hcd		*xhci;
-	/* Dequeue pointer and dequeue segment for a submitted Set TR Dequeue
-	 * command.  We'll need to update the ring's dequeue segment and dequeue
-	 * pointer after the command completes.
-	 */
-	struct xhci_segment	*queued_deq_seg;
-	union xhci_trb		*queued_deq_ptr;
 	/*
 	 * Sometimes the xHC can not process isochronous endpoint ring quickly
 	 * enough, and it will miss some isoc tds on the ring and generate
@@ -1573,6 +1567,13 @@ struct xhci_ring {
 	union  xhci_trb		*dequeue;
 	struct xhci_segment	*deq_seg;
 	struct list_head	td_list;
+	/*
+	 * Dequeue pointer and dequeue segment for a submitted Set TR Dequeue
+	 * command.  We'll need to update the ring's dequeue segment and dequeue
+	 * pointer after the command completes.
+	 */
+	struct xhci_segment	*queued_deq_seg;
+	union xhci_trb		*queued_deq_ptr;
 	/*
 	 * Write the cycle state into the TRB cycle field to give ownership of
 	 * the TRB to the host controller (if we are the producer), or to check
