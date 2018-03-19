@@ -914,7 +914,6 @@ struct xhci_virt_ep {
 	 */
 	struct xhci_ring		*new_ring;
 	unsigned int			ep_state;
-#define SET_DEQ_PENDING		(1 << 0)
 #define EP_HALTED		(1 << 1)	/* For stall handling */
 #define EP_STOP_CMD_PENDING	(1 << 2)	/* For URB cancellation */
 /* Transitioning the endpoint to using streams, don't enqueue URBs */
@@ -926,6 +925,7 @@ struct xhci_virt_ep {
 #define EP_SOFT_CLEAR_TOGGLE	(1 << 7)
 	/* ----  Related to URB cancellation ---- */
 	struct list_head	cancelled_td_list;
+	unsigned int		set_deq_pending_count;
 	/* Watchdog timer for stop endpoint command to cancel URBs */
 	struct timer_list	stop_cmd_timer;
 	struct xhci_hcd		*xhci;
@@ -1580,6 +1580,8 @@ struct xhci_ring {
 	 * if we own the TRB (if we are the consumer).  See section 4.9.1.
 	 */
 	u32			cycle_state;
+	unsigned int		ring_state;
+#define SET_DEQ_PENDING		(1 << 0)
 	unsigned int		stream_id;
 	unsigned int		num_segs;
 	unsigned int		num_trbs_free;

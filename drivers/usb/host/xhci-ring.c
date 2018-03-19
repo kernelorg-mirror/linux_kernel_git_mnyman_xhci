@@ -391,14 +391,14 @@ void xhci_ring_ep_doorbell(struct xhci_hcd *xhci,
 	__le32 __iomem *db_addr = &xhci->dba->doorbell[slot_id];
 	struct xhci_virt_ep *ep = &xhci->devs[slot_id]->eps[ep_index];
 	unsigned int ep_state = ep->ep_state;
-
-	/* Don't ring the doorbell for this endpoint if there are pending
+	/*
+	 * Don't ring the doorbell for this endpoint if there are pending
 	 * cancellations because we don't want to interrupt processing.
-	 * We don't want to restart any stream rings if there's a set dequeue
-	 * pointer command pending because the device can choose to start any
+	 * We don't want to restart any stream rings if there are set dequeue
+	 * pointer commands pending because the device can choose to start any
 	 * stream once the endpoint is on the HW schedule.
 	 */
-	if ((ep_state & EP_STOP_CMD_PENDING) || (ep_state & SET_DEQ_PENDING) ||
+	if ((ep_state & EP_STOP_CMD_PENDING) || (ep->set_deq_pending_count) ||
 	    (ep_state & EP_HALTED))
 		return;
 	writel(DB_VALUE(ep_index, stream_id), db_addr);
@@ -1108,7 +1108,8 @@ static void xhci_handle_cmd_set_deq(struct xhci_hcd *xhci, int slot_id,
 	}
 
 cleanup:
-	dev->eps[ep_index].ep_state &= ~SET_DEQ_PENDING;
+	ep_ring->ring_state &= ~SET_DEQ_PENDING;
+	dev->eps[ep_index].set_deq_pending_count--;
 	ep_ring->queued_deq_seg = NULL;
 	ep_ring->queued_deq_ptr = NULL;
 	/* Restart any rings with pending URBs */
@@ -4031,8 +4032,12 @@ void xhci_queue_new_dequeue_state(struct xhci_hcd *xhci,
 			  deq_state->new_deq_seg, deq_state->new_deq_ptr);
 		return;
 	}
+
+	ep_ring = xhci_triad_to_transfer_ring(xhci, slot_id,
+					      ep_index, deq_state->stream_id);
+
 	ep = &xhci->devs[slot_id]->eps[ep_index];
-	if ((ep->ep_state & SET_DEQ_PENDING)) {
+	if ((ep_ring->ring_state & SET_DEQ_PENDING)) {
 		xhci_warn(xhci, "WARN Cannot submit Set TR Deq Ptr\n");
 		xhci_warn(xhci, "A Set TR Deq Ptr command is pending.\n");
 		return;
@@ -4043,8 +4048,6 @@ void xhci_queue_new_dequeue_state(struct xhci_hcd *xhci,
 	if (!cmd)
 		return;
 
-	ep_ring = xhci_triad_to_transfer_ring(xhci, slot_id,
-					      ep_index, deq_state->stream_id);
 	ep_ring->queued_deq_seg = deq_state->new_deq_seg;
 	ep_ring->queued_deq_ptr = deq_state->new_deq_ptr;
 	if (deq_state->stream_id)
@@ -4057,13 +4060,14 @@ void xhci_queue_new_dequeue_state(struct xhci_hcd *xhci,
 		xhci_free_command(xhci, cmd);
 		return;
 	}
-
-	/* Stop the TD queueing code from ringing the doorbell until
-	 * this command completes.  The HC won't set the dequeue pointer
-	 * if the ring is running, and ringing the doorbell starts the
-	 * ring running.
+	/*
+	 * Stop the TD queueing code from ringing the doorbell until all
+	 * 'set tr dequeue pointer' commands for this endpoint complete.
+	 * The HC won't set the dequeue pointer if the ring is running, and
+	 * ringing the doorbell starts the ring running.
 	 */
-	ep->ep_state |= SET_DEQ_PENDING;
+	ep->set_deq_pending_count++;
+	ep_ring->ring_state |= SET_DEQ_PENDING;
 }
 
 int xhci_queue_reset_ep(struct xhci_hcd *xhci, struct xhci_command *cmd,
