@@ -697,6 +697,7 @@ static void xhci_handle_cmd_stop_ep(struct xhci_hcd *xhci, int slot_id,
 	struct xhci_virt_device *vdev;
 	u64 hw_deq;
 	struct xhci_dequeue_state deq_state;
+	bool set_new_deq = false;
 
 	if (unlikely(TRB_TO_SUSPEND_PORT(le32_to_cpu(trb->generic.field[3])))) {
 		if (!xhci->devs[slot_id])
@@ -765,6 +766,14 @@ static void xhci_handle_cmd_stop_ep(struct xhci_hcd *xhci, int slot_id,
 			xhci_find_new_dequeue_state(xhci, slot_id, ep_index,
 						    cur_td->urb->stream_id,
 						    cur_td, &deq_state);
+			if (!deq_state.new_deq_ptr || !deq_state.new_deq_seg)
+				goto remove_finished_td;
+
+			xhci_queue_new_dequeue_state(xhci, slot_id, ep_index,
+						     &deq_state);
+			deq_state.new_deq_ptr = NULL;
+			deq_state.new_deq_seg = NULL;
+			set_new_deq = true;
 		} else {
 			td_to_noop(xhci, ep_ring, cur_td, false);
 		}
@@ -781,15 +790,11 @@ remove_finished_td:
 	xhci_stop_watchdog_timer_in_irq(xhci, ep);
 
 	/* If necessary, queue a Set Transfer Ring Dequeue Pointer command */
-	if (deq_state.new_deq_ptr && deq_state.new_deq_seg) {
-		xhci_queue_new_dequeue_state(xhci, slot_id, ep_index,
-					     &deq_state);
+	if (set_new_deq)
 		xhci_ring_cmd_db(xhci);
-	} else {
+	else
 		/* Otherwise ring the doorbell(s) to restart queued transfers */
 		ring_doorbell_for_active_rings(xhci, slot_id, ep_index);
-	}
-
 	/*
 	 * Drop the lock and complete the URBs in the cancelled TD list.
 	 * New TDs to be cancelled might be added to the end of the list before
