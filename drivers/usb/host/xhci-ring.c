@@ -720,6 +720,7 @@ static void xhci_handle_cmd_stop_ep(struct xhci_hcd *xhci, int slot_id,
 
 	if (list_empty(&ep->cancelled_td_list)) {
 		xhci_stop_watchdog_timer_in_irq(xhci, ep);
+		ep->stopped_ring = NULL;
 		ring_doorbell_for_active_rings(xhci, slot_id, ep_index);
 		return;
 	}
@@ -761,8 +762,9 @@ static void xhci_handle_cmd_stop_ep(struct xhci_hcd *xhci, int slot_id,
 					 cur_td->urb->stream_id);
 		hw_deq &= ~0xf;
 
-		if (trb_in_td(xhci, cur_td->start_seg, cur_td->first_trb,
-			      cur_td->last_trb, hw_deq, false)) {
+		if ((!ep->stopped_ring || ep->stopped_ring == ep_ring) &&
+		    trb_in_td(xhci, cur_td->start_seg, cur_td->first_trb,
+			       cur_td->last_trb, hw_deq, false)) {
 			xhci_find_new_dequeue_state(xhci, slot_id, ep_index,
 						    cur_td->urb->stream_id,
 						    cur_td, &deq_state);
@@ -795,6 +797,8 @@ remove_finished_td:
 	else
 		/* Otherwise ring the doorbell(s) to restart queued transfers */
 		ring_doorbell_for_active_rings(xhci, slot_id, ep_index);
+
+	ep->stopped_ring = NULL;
 	/*
 	 * Drop the lock and complete the URBs in the cancelled TD list.
 	 * New TDs to be cancelled might be added to the end of the list before
@@ -1952,6 +1956,7 @@ static int finish_td(struct xhci_hcd *xhci, struct xhci_td *td,
 		 * stopped TDs.  A stopped TD may be restarted, so don't update
 		 * the ring dequeue pointer or take this TD off any lists yet.
 		 */
+		ep->stopped_ring = ep_ring;
 		return 0;
 	}
 	if (trb_comp_code == COMP_STALL_ERROR ||

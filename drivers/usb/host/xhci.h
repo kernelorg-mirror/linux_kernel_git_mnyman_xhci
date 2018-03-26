@@ -926,6 +926,7 @@ struct xhci_virt_ep {
 	/* ----  Related to URB cancellation ---- */
 	struct list_head	cancelled_td_list;
 	unsigned int		set_deq_pending_count;
+	struct xhci_ring		*stopped_ring;
 	/* Watchdog timer for stop endpoint command to cancel URBs */
 	struct timer_list	stop_cmd_timer;
 	struct xhci_hcd		*xhci;
