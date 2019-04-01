@@ -1929,6 +1929,8 @@ static int xhci_configure_endpoint_result(struct xhci_hcd *xhci,
 {
 	int ret;
 
+	xhci_get_port_bandwidth(xhci, udev);
+
 	switch (*cmd_status) {
 	case COMP_COMMAND_ABORTED:
 	case COMP_COMMAND_RING_STOPPED:
@@ -2821,26 +2823,66 @@ static int xhci_get_port_bandwidth(struct xhci_hcd *xhci,
 {
 	struct device *dev = xhci_to_hcd(xhci)->self.sysdev;
 	struct xhci_command *command;
-	dma_addr_t dma;
-	unsigned int i;
-	char *ctx;
-	unsigned int hub_slot_id = 0;
-	unsigned int dev_speed =
-		udev->speed == USB_SPEED_HIGH ? 0x3 :
-		udev->speed == USB_SPEED_SUPER ? 0x4 :
-		0x0;
+	struct xhci_hub *rhub;
 	unsigned long flags;
-	int ret = 0;
+	unsigned int hub_slot_id = 0;
+	unsigned int bw_ctx_size;
+	unsigned int dev_speed;
+	unsigned int port_index;
 	unsigned int max_ports;
+	unsigned int i;
+	dma_addr_t dma;
+	char *speed_name;
+	char *bw_ctx;
+	int ret = 0;
+
+	/*
+	 * xhci has three types of bandwidth instances, SS, HS and LS/FS.
+	 * A external single-TT USB2 hub has one LS/FS secondary bandwith
+	 * instance, a multi-TT USB2 hub has several secondary LS/FS BIs.
+	 */
+
+	switch (udev->speed) {
+	case USB_SPEED_FULL:
+	case USB_SPEED_LOW:
+		dev_speed = 2;
+		speed_name = "LS/FS";
+		rhub = &xhci->usb2_rhub;
+		if (udev->parent && udev->parent->parent) {
+			hub_slot_id = udev->parent->slot_id;
+			max_ports = udev->parent->maxchild;
+			bw_ctx_size = max_ports + 1;
+		}
+			break;
+	case USB_SPEED_HIGH:
+		dev_speed = 3;
+		speed_name = "HS";
+		rhub = &xhci->usb2_rhub;
+		break;
+	case USB_SPEED_SUPER:
+	case USB_SPEED_SUPER_PLUS:
+		dev_speed = 4;
+		speed_name = "SS";
+		rhub = &xhci->usb3_rhub;
+		break;
+	default:
+		return -ENODEV;
+	}
+
+	if (!hub_slot_id) {
+		max_ports = rhub->num_ports;
+		bw_ctx_size = HCS_MAX_PORTS(xhci->hcs_params1) + 1;
+	}
 
 	command = xhci_alloc_command(xhci, true, GFP_KERNEL);
 	if (!command)
 		return -ENOMEM;
 
-	max_ports = HCS_MAX_PORTS(xhci->hcs_params1) + 1;
-	ctx = dma_alloc_coherent(dev, round_up(max_ports, 8), &dma, GFP_KERNEL);
-	if (!ctx)
+	bw_ctx = dma_alloc_coherent(dev, round_up(bw_ctx_size, 8), &dma, GFP_KERNEL);
+	if (!bw_ctx) {
+		xhci_free_command(xhci, command);
 		return -ENOMEM;
+	}
 
 	spin_lock_irqsave(&xhci->lock, flags);
 	ret = xhci_queue_get_port_bandwidth(xhci, command, dma,
@@ -2856,13 +2898,30 @@ static int xhci_get_port_bandwidth(struct xhci_hcd *xhci,
 	wait_for_completion(command->completion);
 
 	/* Read Bandwidth utilization from Context */
-	for (i = 0; i < max_ports; i++)
-		dev_warn(&udev->dev,
-			 "port %d - available bandwidth: %hhd %%\n", i, ctx[i]);
+	for (i = 0; i < max_ports; i++) {
+		if (hub_slot_id)
+			port_index = i + 1;
+		else
+			port_index = rhub->ports[i]->hw_portnum + 1;
 
+		dev_dbg(&udev->dev,
+			"Available %s bandwidth on %s port%d - %hhd %%",
+			speed_name, hub_slot_id ? "external hub" : "root hub",
+			port_index, bw_ctx[port_index]);
+
+		xhci_dbg_trace(xhci, trace_xhci_dbg_context_change,
+			       "Available %s bandwidth on %s port%d - %hhd %%",
+			       speed_name,
+			       hub_slot_id ? "external hub" : "root hub",
+			       port_index,
+			       bw_ctx[port_index]);
+	}
 out:
-	dma_free_coherent(dev, round_up(max_ports, 8), ctx, dma);
+	dma_free_coherent(dev, round_up(max_ports, 8), bw_ctx, dma);
 	xhci_free_command(xhci, command);
+
+	if (hub_slot_id)
+		xhci_get_port_bandwidth(xhci, udev->parent);
 
 	return 0;
 }
