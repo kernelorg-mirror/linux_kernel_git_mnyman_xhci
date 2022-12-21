@@ -4000,6 +4000,28 @@ static void xhci_free_dev(struct usb_hcd *hcd, struct usb_device *udev)
 		virt_dev->eps[i].ep_state &= ~EP_STOP_CMD_PENDING;
 	virt_dev->udev = NULL;
 	xhci_disable_slot(xhci, udev->slot_id);
+
+	if (1 && udev->parent && !udev->parent->parent) { /*fixme, real quirk */
+		struct xhci_hub *rhub;
+		u32 portsc;
+
+		rhub = xhci_get_rhub(hcd);
+
+		if (udev->portnum > rhub->num_ports) {
+			xhci_warn(xhci, "Invalid portnum %d for late clearing CSC\n", udev->portnum);
+			goto out;
+		}
+
+		portsc = readl(rhub->ports[udev->portnum - 1]->addr);
+
+		if (!(portsc & PORT_CONNECT) && (portsc & PORT_CSC)) {
+			xhci_warn(xhci, "Late clearing port-%d CSC, portsc 0x%x\n",
+				  udev->portnum, portsc);
+			portsc = xhci_port_state_to_neutral(portsc);
+			writel(portsc | PORT_CSC, rhub->ports[udev->portnum - 1]->addr);
+		}
+	}
+out:
 	xhci_free_virt_device(xhci, udev->slot_id);
 }
 

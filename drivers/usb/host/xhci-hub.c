@@ -603,6 +603,10 @@ static void xhci_clear_port_change_bit(struct xhci_hcd *xhci, u16 wValue,
 		port_change_bit = "warm(BH) reset";
 		break;
 	case USB_PORT_FEAT_C_CONNECTION:
+		if (1 && !(readl(addr) & PORT_CONNECT)) { /* add proper quirk */
+			xhci_warn(xhci, "Delay clearing port-%d CSC\n", wIndex + 1);
+			return;
+		}
 		status = PORT_CSC;
 		port_change_bit = "connect";
 		break;
