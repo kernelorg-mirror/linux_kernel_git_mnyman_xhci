@@ -2317,7 +2317,7 @@ xhci_alloc_interrupter(struct xhci_hcd *xhci, int segs, gfp_t flags)
 
 static int
 xhci_add_interrupter(struct xhci_hcd *xhci, struct xhci_interrupter *ir,
-		     unsigned int intr_num)
+		     unsigned int intr_num, bool ip_autoclear)
 {
 	u64 erst_base;
 	u32 erst_size;
@@ -2336,6 +2336,7 @@ xhci_add_interrupter(struct xhci_hcd *xhci, struct xhci_interrupter *ir,
 	xhci->interrupters[intr_num] = ir;
 	ir->intr_num = intr_num;
 	ir->ir_set = &xhci->run_regs->ir_set[intr_num];
+	ir->ip_autoclear = ip_autoclear;
 
 	/* set ERST count with the number of entries in the segment table */
 	erst_size = readl(&ir->ir_set->erst_size);
@@ -2355,7 +2356,8 @@ xhci_add_interrupter(struct xhci_hcd *xhci, struct xhci_interrupter *ir,
 }
 
 struct xhci_interrupter *
-xhci_create_secondary_interrupter(struct usb_hcd *hcd, int num_seg)
+xhci_create_secondary_interrupter(struct usb_hcd *hcd, int num_seg,
+				  bool ip_autoclear)
 {
 	struct xhci_hcd *xhci = hcd_to_xhci(hcd);
 	struct xhci_interrupter *ir;
@@ -2374,7 +2376,7 @@ xhci_create_secondary_interrupter(struct usb_hcd *hcd, int num_seg)
 	/* Find available secondary interrupter, interrupter 0 is reserved for primary */
 	for (i = 1; i < xhci->max_interrupters; i++) {
 		if (xhci->interrupters[i] == NULL) {
-			err = xhci_add_interrupter(xhci, ir, i);
+			err = xhci_add_interrupter(xhci, ir, i, ip_autoclear);
 			break;
 		}
 	}
@@ -2530,7 +2532,7 @@ int xhci_mem_init(struct xhci_hcd *xhci, gfp_t flags)
 	if (!ir)
 		goto fail;
 
-	if (xhci_add_interrupter(xhci, ir, 0))
+	if (xhci_add_interrupter(xhci, ir, 0, xhci->ip_autoclear))
 		goto fail;
 
 	xhci->isoc_bei_interval = AVOID_BEI_INTERVAL_MAX;

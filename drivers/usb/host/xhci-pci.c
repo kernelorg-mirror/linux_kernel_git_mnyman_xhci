@@ -161,6 +161,7 @@ static int xhci_try_enable_msi(struct usb_hcd *hcd)
 
 	hcd->msi_enabled = 1;
 	hcd->msix_enabled = pdev->msix_enabled;
+	xhci->ip_autoclear = 1;
 	return 0;
 
 free_irq_vectors:
