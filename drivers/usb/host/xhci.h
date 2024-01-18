@@ -1894,6 +1894,8 @@ struct xhci_hcd {
 	unsigned		broken_suspend:1;
 	/* Indicates that omitting hcd is supported if root hub has no ports */
 	unsigned		allow_single_roothub:1;
+	/* No extra event for last TRB in isoc TD if one is sent mid TD  */
+	unsigned		one_event_per_isoc_td:1;
 	/* cached usb2 extened protocol capabilites */
 	u32                     *ext_caps;
 	unsigned int            num_ext_caps;

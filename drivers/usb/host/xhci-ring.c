@@ -2408,8 +2408,14 @@ static int process_isoc_td(struct xhci_hcd *xhci, struct xhci_virt_ep *ep,
 
 		if (ep_trb == td->last_trb)
 			break;
+		/*
+		 * Error mid TD. Wait for last TRB or next TD event
+		 * Only give back the TD here if no more events are expected
+		 */
+		if (xhci->one_event_per_isoc_td &&
+		    list_is_last(&td->td_list, &ep_ring->td_list))
+			break;
 
-		/* Error mid TD, don't give TD back yet */
 		td->error_mid_td = true;
 		td->urb_length_set = true;
 
@@ -2862,6 +2868,7 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 				if (ep_seg) {
 					/* give back previous TD, start handling new */
 					xhci_dbg(xhci, "Missing TD completion event after mid TD error\n");
+					xhci->one_event_per_isoc_td = 1;
 					ep_ring->dequeue = td->last_trb;
 					ep_ring->deq_seg = td->last_trb_seg;
 					inc_deq(xhci, ep_ring);
