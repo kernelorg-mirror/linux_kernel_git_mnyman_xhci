@@ -121,48 +121,46 @@ static void xhci_set_link_trb(struct xhci_segment *prev, struct xhci_segment *ne
 }
 
 /*
- * Link the ring to the new segments.
+ * Link the new segments to the ring segment list.
  * Set Toggle Cycle for the new ring if needed.
  */
 static void xhci_link_rings(struct xhci_hcd *xhci, struct xhci_ring *ring,
 			    struct list_head *new_list, unsigned int num_segs)
 {
-	struct xhci_segment *next, *seg, *last;
+	struct xhci_segment *new_list_last, *tgt_list_last;
+	struct xhci_segment *next, *seg;
 	bool chain_links;
 
 	if (!ring || !new_list)
 		return;
 
-	/* Set chain bit for 0.95 hosts, and for isoc rings on AMD 0.96 host */
-	chain_links = !!(xhci_link_trb_quirk(xhci) ||
-			 (ring->type == TYPE_ISOC &&
-			  (xhci->quirks & XHCI_AMD_0x96_HOST)));
-
-	last = list_last_entry(new_list, struct xhci_segment, list);
-
-	if (ring->type != TYPE_EVENT) {
-		seg = list_first_entry(new_list, struct xhci_segment, list);
-		xhci_set_link_trb(ring->enq_seg, seg, chain_links);
-		seg = list_next_entry_circular(ring->enq_seg, &ring->seg_list, list);
-		xhci_set_link_trb(last, seg, chain_links);
-	}
+	new_list_last = list_last_entry(new_list, struct xhci_segment, list);
+	tgt_list_last = list_last_entry(&ring->seg_list, struct xhci_segment, list);
 
 	list_splice(new_list, &ring->enq_seg->list);
 	ring->num_segs += num_segs;
 
-	if (ring->enq_seg == ring->last_seg) {
-		if (ring->type != TYPE_EVENT) {
-			ring->last_seg->trbs[TRBS_PER_SEGMENT-1].link.control
-				&= ~cpu_to_le32(LINK_TOGGLE);
-			last->trbs[TRBS_PER_SEGMENT-1].link.control
-				|= cpu_to_le32(LINK_TOGGLE);
-		}
-		ring->last_seg = last;
-	}
-
-	for (seg = ring->enq_seg; seg != ring->last_seg; seg = next) {
+	for (seg = ring->enq_seg; !list_is_last(&seg->list, &ring->seg_list); seg = next) {
 		next = list_next_entry(seg, list);
 		next->num = seg->num + 1;
+	}
+	ring->last_seg = seg;
+
+	if (ring->type == TYPE_EVENT)
+		return;
+
+	/* Set chain bit for 0.95 hosts, and for isoc rings on AMD 0.96 host */
+	chain_links = !!(xhci_link_trb_quirk(xhci) ||
+			 (ring->type == TYPE_ISOC && (xhci->quirks & XHCI_AMD_0x96_HOST)));
+
+	xhci_set_link_trb(ring->enq_seg, list_next_entry(ring->enq_seg, list), chain_links);
+
+	if (list_is_last(&new_list_last->list, &ring->seg_list)) {
+		xhci_set_link_trb(new_list_last, ring->first_seg, chain_links);
+		tgt_list_last->trbs[TRBS_PER_SEGMENT - 1].link.control &= ~cpu_to_le32(LINK_TOGGLE);
+		new_list_last->trbs[TRBS_PER_SEGMENT - 1].link.control |= cpu_to_le32(LINK_TOGGLE);
+	} else {
+		xhci_set_link_trb(new_list_last, list_next_entry(new_list_last, list), chain_links);
 	}
 }
 
