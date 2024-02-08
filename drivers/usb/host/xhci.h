@@ -1597,10 +1597,11 @@ static inline const char *xhci_ring_type_string(enum xhci_ring_type type)
 	return "UNKNOWN";
 }
 
+#define RING_FIRST_SEG(list_head) list_first_entry(list_head, struct xhci_segment, list)
+#define RING_LAST_SEG(list_head) list_last_entry(list_head, struct xhci_segment, list)
+
 struct xhci_ring {
 	struct list_head	seg_list;
-	struct xhci_segment	*first_seg;
-	struct xhci_segment	*last_seg;
 	union  xhci_trb		*enqueue;
 	struct xhci_segment	*enq_seg;
 	union  xhci_trb		*dequeue;
