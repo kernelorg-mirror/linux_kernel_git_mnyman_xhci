@@ -1519,7 +1519,7 @@ static inline const char *xhci_trb_type_string(u8 type)
 struct xhci_segment {
 	union xhci_trb		*trbs;
 	/* private to HCD */
-	struct xhci_segment	*next;
+	struct list_head	list;
 	unsigned int		num;
 	dma_addr_t		dma;
 	/* Max packet sized bounce buffer for td-fragmant alignment */
@@ -1598,6 +1598,7 @@ static inline const char *xhci_ring_type_string(enum xhci_ring_type type)
 }
 
 struct xhci_ring {
+	struct list_head	seg_list;
 	struct xhci_segment	*first_seg;
 	struct xhci_segment	*last_seg;
 	union  xhci_trb		*enqueue;
@@ -2130,7 +2131,7 @@ int xhci_alloc_tt_info(struct xhci_hcd *xhci,
 
 /* xHCI ring, segment, TRB, and TD functions */
 dma_addr_t xhci_trb_virt_to_dma(struct xhci_segment *seg, union xhci_trb *trb);
-struct xhci_segment *trb_in_td(struct xhci_hcd *xhci,
+struct xhci_segment *trb_in_td(struct xhci_hcd *xhci, struct xhci_ring *ring,
 		struct xhci_segment *start_seg, union xhci_trb *start_trb,
 		union xhci_trb *end_trb, dma_addr_t suspect_dma, bool debug);
 int xhci_is_vendor_info_code(struct xhci_hcd *xhci, unsigned int trb_comp_code);
