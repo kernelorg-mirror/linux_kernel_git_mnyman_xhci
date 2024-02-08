@@ -322,36 +322,32 @@ static int xhci_alloc_segments_for_ring(struct xhci_hcd *xhci,
 					unsigned int max_packet,
 					gfp_t flags)
 {
-	struct xhci_segment *first;
+	struct xhci_segment *next;
 	struct xhci_segment *prev;
 	bool chain_links;
 
 	/* Set chain bit for 0.95 hosts, and for isoc rings on AMD 0.96 host */
 	chain_links = !!(xhci_link_trb_quirk(xhci) ||
-			 (type == TYPE_ISOC &&
-			  (xhci->quirks & XHCI_AMD_0x96_HOST)));
-
-	first = xhci_segment_alloc(xhci, cycle_state, max_packet, 0, flags);
-	if (!first)
-		return -ENOMEM;
-	list_add_tail(&first->list, seg_list);
+			 (type == TYPE_ISOC && (xhci->quirks & XHCI_AMD_0x96_HOST)));
 
 	prev = NULL;
-	for (int num = 1; num < num_segs; num++) {
-		struct xhci_segment	*next;
-
-		next = xhci_segment_alloc(xhci, cycle_state, max_packet, num,
-					  flags);
+	for (int num = 0; num < num_segs; num++) {
+		next = xhci_segment_alloc(xhci, cycle_state, max_packet, num, flags);
 		if (!next)
 			goto free_segments;
 
 		list_add_tail(&next->list, seg_list);
+
 		if (type != TYPE_EVENT)
 			xhci_set_link_trb(prev, next, chain_links);
 		prev = next;
 	}
-	if (type != TYPE_EVENT)
-		xhci_set_link_trb(prev, first, chain_links);
+
+	/* Link list end to start. */
+	if (type != TYPE_EVENT) {
+		prev = list_first_entry(seg_list, struct xhci_segment, list);
+		xhci_set_link_trb(next, prev, chain_links);
+	}
 
 	return 0;
 
