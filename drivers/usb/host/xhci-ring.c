@@ -1008,7 +1008,7 @@ static int xhci_invalidate_cancelled_tds(struct xhci_virt_ep *ep)
 				if (cached_td) {
 					if (cached_td->urb->stream_id != td->urb->stream_id) {
 						/* Multiple streams case, defer move dq */
-						xhci_dbg(xhci,
+						xhci_warn(xhci,
 							 "Move dq deferred: stream %u URB %p\n",
 							 td->urb->stream_id, td->urb);
 						td->cancel_status = TD_CLEARING_CACHE_DEFERRED;
@@ -1340,6 +1340,7 @@ static void xhci_handle_cmd_set_deq(struct xhci_hcd *xhci, int slot_id,
 	struct xhci_slot_ctx *slot_ctx;
 	struct xhci_td *td, *tmp_td;
 	bool deferred = false;
+	char str[XHCI_MSG_MAX];
 
 	ep_index = TRB_TO_EP_INDEX(le32_to_cpu(trb->generic.field[3]));
 	stream_id = TRB_TO_STREAM_ID(le32_to_cpu(trb->generic.field[2]));
@@ -1351,6 +1352,11 @@ static void xhci_handle_cmd_set_deq(struct xhci_hcd *xhci, int slot_id,
 	if (!ep_ring) {
 		xhci_warn(xhci, "WARN Set TR deq ptr command for freed stream ID %u\n",
 				stream_id);
+		xhci_warn(xhci, "MN: %s\n" ,
+			  xhci_decode_trb(str, XHCI_MSG_MAX, le32_to_cpu(trb->generic.field[0]),
+					  le32_to_cpu(trb->generic.field[1]),
+					  le32_to_cpu(trb->generic.field[2]),
+					  le32_to_cpu(trb->generic.field[3])));
 		/* XXX: Harmless??? */
 		goto cleanup;
 	}
@@ -1386,6 +1392,12 @@ static void xhci_handle_cmd_set_deq(struct xhci_hcd *xhci, int slot_id,
 					cmd_comp_code);
 			break;
 		}
+		xhci_warn(xhci, "MN: %s\n",
+			  xhci_decode_trb(str, XHCI_MSG_MAX, le32_to_cpu(trb->generic.field[0]),
+					  le32_to_cpu(trb->generic.field[1]),
+					  le32_to_cpu(trb->generic.field[2]),
+					  le32_to_cpu(trb->generic.field[3])));
+
 		/* OK what do we do now?  The endpoint state is hosed, and we
 		 * should never get to this point if the synchronization between
 		 * queueing, and endpoint state are correct.  This might happen
@@ -2864,6 +2876,12 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 					trb_comp_code);
 				trb_in_td(xhci, td, ep_trb_dma, true);
 
+				if (xhci_halted_host_endpoint(ep_ctx, trb_comp_code)) {
+					xhci_err(xhci, "MN: No TD found, fix halted ep");
+					xhci_handle_halted_endpoint(xhci, ep, NULL, EP_HARD_RESET);
+				} else {
+					xhci_err(xhci, "MN: No TD found, ep not halted");
+				}
 				return -ESHUTDOWN;
 			}
 		}

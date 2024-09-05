@@ -1749,14 +1749,14 @@ static int xhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 
 	i = urb_priv->num_tds_done;
 	if (i < urb_priv->num_tds)
-		xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
-				"Cancel URB %p, dev %s, ep 0x%x, "
-				"starting at offset 0x%llx",
-				urb, urb->dev->devpath,
-				urb->ep->desc.bEndpointAddress,
-				(unsigned long long) xhci_trb_virt_to_dma(
-					urb_priv->td[i].start_seg,
-					urb_priv->td[i].first_trb));
+		xhci_warn(xhci,
+			  "Cancel URB %p, dev %s, ep 0x%x, stream_id %u starting at offset 0x%llx",
+			  urb, urb->dev->devpath,
+			  urb->ep->desc.bEndpointAddress,
+			  urb->stream_id,
+			  (unsigned long long) xhci_trb_virt_to_dma(
+				  urb_priv->td[i].start_seg,
+				  urb_priv->td[i].first_trb));
 
 	for (; i < urb_priv->num_tds; i++) {
 		td = &urb_priv->td[i];
