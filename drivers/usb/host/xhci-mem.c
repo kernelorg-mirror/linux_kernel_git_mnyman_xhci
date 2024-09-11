@@ -664,6 +664,9 @@ struct xhci_stream_info *xhci_alloc_stream_info(struct xhci_hcd *xhci,
 			goto cleanup_rings;
 		}
 	}
+
+	trace_xhci_alloc_stream_info(stream_info);
+
 	/* Leave the other unused stream ring pointers in the stream context
 	 * array initialized to zero.  This will cause the xHC to give us an
 	 * error if the device asks for a stream ID we don't have setup (if it
@@ -744,6 +747,8 @@ void xhci_free_stream_info(struct xhci_hcd *xhci,
 
 	if (!stream_info)
 		return;
+
+	trace_xhci_free_stream_info(stream_info);
 
 	for (cur_stream = 1; cur_stream < stream_info->num_streams;
 			cur_stream++) {

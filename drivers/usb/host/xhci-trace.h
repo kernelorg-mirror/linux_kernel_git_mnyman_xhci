@@ -246,6 +246,35 @@ DEFINE_EVENT(xhci_log_virt_dev, xhci_stop_device,
 	TP_ARGS(vdev)
 );
 
+DECLARE_EVENT_CLASS(xhci_log_stream_info,
+	TP_PROTO(struct xhci_stream_info *info),
+	TP_ARGS(info),
+	TP_STRUCT__entry(
+		__field(unsigned int, num_streams)
+		__field(unsigned int, num_stream_ctxs)
+		__field(dma_addr_t, ctx_array_dma)
+	),
+	TP_fast_assign(
+		__entry->num_streams = info->num_streams;
+		__entry->num_stream_ctxs = info->num_stream_ctxs;
+		__entry->ctx_array_dma = info->ctx_array_dma;
+	),
+	TP_printk("streams %u context %u stream array dma %pad",
+		__entry->num_streams, __entry->num_stream_ctxs,
+		&__entry->ctx_array_dma
+	)
+);
+
+DEFINE_EVENT(xhci_log_stream_info, xhci_alloc_stream_info,
+	TP_PROTO(struct xhci_stream_info *info),
+	TP_ARGS(info)
+);
+
+DEFINE_EVENT(xhci_log_stream_info, xhci_free_stream_info,
+	TP_PROTO(struct xhci_stream_info *info),
+	TP_ARGS(info)
+);
+
 DECLARE_EVENT_CLASS(xhci_log_urb,
 	TP_PROTO(struct urb *urb),
 	TP_ARGS(urb),
