@@ -495,6 +495,7 @@ void xhci_ring_ep_doorbell(struct xhci_hcd *xhci,
 	__le32 __iomem *db_addr = &xhci->dba->doorbell[slot_id];
 	struct xhci_virt_ep *ep = &xhci->devs[slot_id]->eps[ep_index];
 	unsigned int ep_state = ep->ep_state;
+	struct xhci_ep_ctx *ep_ctx;
 
 	/* Don't ring the doorbell for this endpoint if there are pending
 	 * cancellations because we don't want to interrupt processing.
@@ -506,6 +507,9 @@ void xhci_ring_ep_doorbell(struct xhci_hcd *xhci,
 	    (ep_state & EP_HALTED) || (ep_state & EP_CLEARING_TT))
 		return;
 
+	ep_ctx = xhci_get_ep_ctx(xhci, ep->vdev->out_ctx, ep_index);
+	if (GET_EP_CTX_STATE(ep_ctx) == EP_STATE_STOPPED)
+		ep->ep_state |= EP_START_PENDING;
 	trace_xhci_ring_ep_doorbell(slot_id, DB_VALUE(ep_index, stream_id));
 
 	writel(DB_VALUE(ep_index, stream_id), db_addr);
@@ -1151,12 +1155,15 @@ static void xhci_handle_cmd_stop_ep(struct xhci_hcd *xhci, int slot_id,
 			return;
 		case EP_STATE_STOPPED:
 			/*
-			 * NEC uPD720200 sometimes sets this state and fails with
-			 * Context Error while continuing to process TRBs.
-			 * Be conservative and trust EP_CTX_STATE on other chips.
+			 * Endpoint was already, or is still stopped when command completes,
+			 * if EP_START_PENDING is set then xHC HW didn't manage to start endpoint
+			 * after previous urb cancel, even if driver ordered it to start by ringing
+			 * the doorbell. Endpoint may restart at any point now so queue another
+			 * stop endpoint command
 			 */
-			if (!(xhci->quirks & XHCI_NEC_HOST))
+			if (!(ep->ep_state & EP_START_PENDING))
 				break;
+			xhci_dbg(xhci, "Stop ep ctx error, already stopped with pending start\n");
 			fallthrough;
 		case EP_STATE_RUNNING:
 			/* Race, HW handled stop ep cmd before ep was running */
@@ -1167,6 +1174,7 @@ static void xhci_handle_cmd_stop_ep(struct xhci_hcd *xhci, int slot_id,
 				ep->ep_state &= ~EP_STOP_CMD_PENDING;
 				return;
 			}
+			ep->ep_state &= ~EP_START_PENDING;
 			xhci_queue_stop_endpoint(xhci, command, slot_id, ep_index, 0);
 			xhci_ring_cmd_db(xhci);
 
@@ -1181,8 +1189,9 @@ static void xhci_handle_cmd_stop_ep(struct xhci_hcd *xhci, int slot_id,
 	ep->ep_state &= ~EP_STOP_CMD_PENDING;
 
 	/* Otherwise ring the doorbell(s) to restart queued transfers */
-	xhci_giveback_invalidated_tds(ep);
 	ring_doorbell_for_active_rings(xhci, slot_id, ep_index);
+	xhci_giveback_invalidated_tds(ep);
+
 }
 
 static void xhci_kill_ring_urbs(struct xhci_hcd *xhci, struct xhci_ring *ring)
@@ -2654,6 +2663,15 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 		xhci_err(xhci, "ERROR Invalid Transfer event\n");
 		goto err_out;
 	}
+
+	/*
+	 * xhci 4.6.9 'Stop Endpoint' states that if a ring is halted with an
+	 * error when Stop Endpoint command completes, no 'Stopped transfers
+	 * event' shall be generated.
+	 * If this is true then we can clear the EP_START_PENDING flag here
+	 * without checking for Stopped transfer event condition
+	 */
+	ep->ep_state &= ~EP_START_PENDING;
 
 	ep_ring = xhci_dma_to_transfer_ring(ep, ep_trb_dma);
 	ep_ctx = xhci_get_ep_ctx(xhci, ep->vdev->out_ctx, ep_index);
