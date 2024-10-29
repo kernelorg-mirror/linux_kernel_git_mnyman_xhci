@@ -1362,20 +1362,41 @@ static void xhci_handle_cmd_set_deq(struct xhci_hcd *xhci, int slot_id,
 
 	if (cmd_comp_code != COMP_SUCCESS) {
 		unsigned int ep_state;
-		unsigned int slot_state;
 
 		switch (cmd_comp_code) {
 		case COMP_TRB_ERROR:
 			xhci_warn(xhci, "WARN Set TR Deq Ptr cmd invalid because of stream ID configuration\n");
 			break;
 		case COMP_CONTEXT_STATE_ERROR:
-			xhci_warn(xhci, "WARN Set TR Deq Ptr cmd failed due to incorrect slot or ep state.\n");
 			ep_state = GET_EP_CTX_STATE(ep_ctx);
-			slot_state = le32_to_cpu(slot_ctx->dev_state);
-			slot_state = GET_SLOT_STATE(slot_state);
-			xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
-					"Slot state = %u, EP state = %u",
-					slot_state, ep_state);
+			xhci_warn(xhci, "WARN Set TR Deq Ptr cmd failed due to incorrect slot or ep state %u\n",
+				  ep_state);
+			/*
+			 * Race due to ring restart latency after old doorbell
+			 * ring. HW completed set tr deq before it got ring
+			 * running, so stop endpoint again.
+			 */
+			if (ep_state == EP_STATE_RUNNING) {
+				struct xhci_command *cmd;
+
+				cmd = xhci_alloc_command(xhci, false, GFP_ATOMIC);
+				if (!cmd)
+					break;  // this in not handled properly
+
+				/* Set TR Deq failed, xHC TD cache is not cleared */
+				list_for_each_entry_safe(td, tmp_td, &ep->cancelled_td_list,
+							 cancelled_td_list) {
+					if (td->cancel_status == TD_CLEARING_CACHE)
+						td->cancel_status = TD_DIRTY;
+				}
+				ep->queued_deq_seg = NULL;
+				ep->queued_deq_ptr = NULL;
+				ep->ep_state |= EP_STOP_CMD_PENDING;
+				ep->ep_state &= ~SET_DEQ_PENDING;
+				xhci_queue_stop_endpoint(xhci, cmd, slot_id, ep_index, 0);
+				xhci_ring_cmd_db(xhci);
+				return;
+			}
 			break;
 		case COMP_SLOT_NOT_ENABLED_ERROR:
 			xhci_warn(xhci, "WARN Set TR Deq Ptr cmd failed because slot %u was not enabled.\n",
