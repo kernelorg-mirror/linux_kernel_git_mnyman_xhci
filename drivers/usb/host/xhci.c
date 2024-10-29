@@ -1768,20 +1768,23 @@ static int xhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 		}
 	}
 
-	/* Queue a stop endpoint command, but only if this is
-	 * the first cancellation to be handled.
+	/*
+	 * Don't queue a Stop Endpoint command if there already is a penging
+	 * unhandled Stop Endpoint or Set TR Deq command. The completion
+	 * handler of those will process this cancelled dirty TD
 	 */
-	if (!(ep->ep_state & EP_STOP_CMD_PENDING)) {
-		command = xhci_alloc_command(xhci, false, GFP_ATOMIC);
-		if (!command) {
-			ret = -ENOMEM;
-			goto done;
-		}
-		ep->ep_state |= EP_STOP_CMD_PENDING;
-		xhci_queue_stop_endpoint(xhci, command, urb->dev->slot_id,
-					 ep_index, 0);
-		xhci_ring_cmd_db(xhci);
+	if (ep->ep_state & (EP_STOP_CMD_PENDING | SET_DEQ_PENDING))
+		goto done;
+
+	command = xhci_alloc_command(xhci, false, GFP_ATOMIC);
+	if (!command) {
+		ret = -ENOMEM;
+		goto done;
 	}
+	ep->ep_state |= EP_STOP_CMD_PENDING;
+	xhci_queue_stop_endpoint(xhci, command, urb->dev->slot_id, ep_index, 0);
+	xhci_ring_cmd_db(xhci);
+
 done:
 	spin_unlock_irqrestore(&xhci->lock, flags);
 	return ret;
