@@ -164,6 +164,24 @@ static unsigned int trb_to_pos(struct xhci_segment *seg, union xhci_trb *trb)
 	return seg->num * TRBS_PER_SEGMENT + (trb - seg->trbs);
 }
 
+/*
+ * turn a trb into a position index in the ring
+ * if base is set then index numbering will wrap around at that point.
+ * simplified example, ring with two segments, each has 4 trbs
+ * index, base = 0: 0,1,2,3,  4,5,6,7
+ * index, base = 2: 8,9,2,3,  4,5,6,7
+ */
+static unsigned int trb_to_rebased_pos(struct xhci_segment *seg, union xhci_trb *trb,
+				      unsigned int trbs_in_ring, unsigned int base)
+{
+	unsigned int pos = trb_to_pos(seg, trb);
+
+	if (pos < base)
+		pos += trbs_in_ring;
+
+	return pos;
+}
+
 /* Updates trb to point to the next TRB in the ring, and updates seg if the next
  * TRB is in a new segment.  This does not skip over link TRBs, and it does not
  * effect the ring dequeue or enqueue pointers.
@@ -2639,6 +2657,45 @@ static bool xhci_spurious_success_tx_event(struct xhci_hcd *xhci,
 	}
 }
 
+static struct xhci_td *
+trb_find_td(dma_addr_t dma, struct xhci_ring *ring)
+{
+	static union xhci_trb *trb;
+	struct xhci_segment *seg;
+	struct xhci_td *td;
+	unsigned int td_end, td_start;
+	unsigned int ev, deq, enq;
+	unsigned int trbs_in_ring;
+
+	trb = xhci_dma_to_trb(ring->deq_seg, dma, &seg);
+	if (!trb)
+		return NULL; // MATTU print fat warning
+
+	trbs_in_ring = ring->num_segs * TRBS_PER_SEGMENT;
+	deq = trb_to_pos(ring->deq_seg, ring->dequeue);
+	enq = trb_to_rebased_pos(ring->enq_seg, ring->enqueue, trbs_in_ring, deq);
+	ev = trb_to_rebased_pos(seg, trb, trbs_in_ring, deq);
+
+	if (ev >= enq)
+		return NULL; /* FIXME maybe return ERR_PTR */
+
+	list_for_each_entry(td, &ring->td_list, td_list) {
+
+		td_end = trb_to_rebased_pos(td->end_seg, td->end_trb, trbs_in_ring, deq);
+
+		if (ev > td_end)
+			continue;
+
+		td_start = trb_to_rebased_pos(td->start_seg, td->start_trb, trbs_in_ring, deq);
+
+		if (ev >= td_start)
+			return td;
+
+		return NULL;
+	}
+	return NULL;
+}
+
 /*
  * If this function returns an error condition, it means it got a Transfer
  * event with a corrupted Slot ID, Endpoint ID, or TRB DMA address.
@@ -2652,6 +2709,7 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 	struct xhci_ring *ep_ring;
 	unsigned int slot_id;
 	int ep_index;
+	struct xhci_td *ev_td = NULL;
 	struct xhci_td *td = NULL;
 	dma_addr_t ep_trb_dma;
 	union xhci_trb *ep_trb;
@@ -2686,6 +2744,8 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 
 	/* find the transfer trb this events points to */
 	ep_trb = xhci_dma_to_trb(ep_ring->deq_seg, ep_trb_dma, NULL);
+	if (ep_trb)
+		ev_td = trb_find_td(ep_trb_dma, ep_ring);
 
 	/* Look for common error cases */
 	switch (trb_comp_code) {
@@ -2828,7 +2888,7 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 	 */
 	td = list_first_entry_or_null(&ep_ring->td_list, struct xhci_td, td_list);
 
-	if (td && td->error_mid_td && !trb_in_td(td, ep_trb_dma)) {
+	if (td && td->error_mid_td && td != ev_td) {
 		xhci_dbg(xhci, "Missing TD completion event after mid TD error\n");
 		xhci_dequeue_td(xhci, td, ep_ring, td->status);
 	}
@@ -2861,7 +2921,7 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 				      td_list);
 
 		/* Is this TRB not the currently executing TD? */
-		if (!trb_in_td(td, ep_trb_dma)) {
+		if (td != ev_td) {
 
 			if (ep->skip && usb_endpoint_xfer_isoc(&td->urb->ep->desc)) {
 				/* this event is unlikely to match any TD, don't skip them all */
