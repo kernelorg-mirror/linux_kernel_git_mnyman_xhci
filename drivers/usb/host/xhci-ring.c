@@ -2468,7 +2468,7 @@ static void process_isoc_td(struct xhci_hcd *xhci, struct xhci_virt_ep *ep,
 		frame->status = -EXDEV;
 		sum_trbs_for_length = true;
 		if (ep_trb != td->end_trb)
-			td->error_mid_td = true;
+			xhci_dbg(xhci, "Missed service error mid TD, giveback TD anyway\n");
 		break;
 	case COMP_INCOMPATIBLE_DEVICE_ERROR:
 	case COMP_STALL_ERROR:
@@ -2521,8 +2521,7 @@ finish_td:
 	finish_td(xhci, ep, ep_ring, td, trb_comp_code);
 }
 
-static void skip_isoc_td(struct xhci_hcd *xhci, struct xhci_td *td,
-			 struct xhci_virt_ep *ep, int status)
+static void skip_isoc_td(struct xhci_hcd *xhci, struct xhci_td *td)
 {
 	struct urb_priv *urb_priv;
 	struct usb_iso_packet_descriptor *frame;
@@ -2537,8 +2536,6 @@ static void skip_isoc_td(struct xhci_hcd *xhci, struct xhci_td *td,
 
 	/* calc actual length */
 	frame->actual_length = 0;
-
-	xhci_dequeue_td(xhci, td, ep->ring, status);
 }
 
 /*
@@ -2641,24 +2638,54 @@ static int handle_transferless_tx_event(struct xhci_hcd *xhci, struct xhci_virt_
 	return 0;
 }
 
-static bool xhci_spurious_success_tx_event(struct xhci_hcd *xhci,
-					   struct xhci_ring *ring)
+static void debug_nomatch_tx_event(struct xhci_hcd *xhci, struct xhci_ring *ring,
+				   union xhci_trb *ep_trb, dma_addr_t ep_trb_dma,
+				   u32 comp_code)
 {
+	struct xhci_td *td;
+	dma_addr_t dma;
+
+	/* Ring may stop anywhere, event TRB may not match any TD, ignore */
+	if (comp_code == COMP_STOPPED ||
+	    comp_code == COMP_STOPPED_LENGTH_INVALID)
+		return;
+
+	/* Event for cancelled no-op TRB that was cached by xHC, ignore */
+	if (ep_trb && trb_is_noop(ep_trb))
+		return;
+
+	/* Expected events for TDs already given back, known cases, ignore */
 	switch (ring->old_trb_comp_code) {
 	case COMP_SHORT_PACKET:
-		return xhci->quirks & XHCI_SPURIOUS_SUCCESS;
+		if (xhci->quirks & XHCI_SPURIOUS_SUCCESS)
+			return;
+		break;
 	case COMP_USB_TRANSACTION_ERROR:
 	case COMP_BABBLE_DETECTED_ERROR:
 	case COMP_ISOCH_BUFFER_OVERRUN:
-		return xhci->quirks & XHCI_ETRON_HOST &&
-			ring->type == TYPE_ISOC;
+		if (xhci->quirks & XHCI_ETRON_HOST && ring->type == TYPE_ISOC)
+			return;
+		break;
 	default:
-		return false;
+		break;
 	}
+
+	td = list_first_entry_or_null(&ring->td_list, struct xhci_td, td_list);
+	if (td)
+		dma = xhci_trb_virt_to_dma(td->start_seg, td->start_trb);
+	else
+		dma = xhci_trb_virt_to_dma(ring->deq_seg, ring->dequeue);
+
+	xhci_err(xhci, "Event dma %pad status %d %s at %pad\n",
+		 &ep_trb_dma, comp_code,
+		 td? "mismatch TD starting" : "on empty ring with deq seg",
+		 &dma);
+
+	return;
 }
 
 static struct xhci_td *
-trb_find_td(dma_addr_t dma, struct xhci_ring *ring)
+trb_find_td(dma_addr_t dma, struct xhci_ring *ring, struct xhci_td **passed_td)
 {
 	static union xhci_trb *trb;
 	struct xhci_segment *seg;
@@ -2675,6 +2702,7 @@ trb_find_td(dma_addr_t dma, struct xhci_ring *ring)
 	deq = trb_to_pos(ring->deq_seg, ring->dequeue);
 	enq = trb_to_rebased_pos(ring->enq_seg, ring->enqueue, trbs_in_ring, deq);
 	ev = trb_to_rebased_pos(seg, trb, trbs_in_ring, deq);
+	*passed_td = NULL;
 
 	if (ev >= enq)
 		return NULL; /* FIXME maybe return ERR_PTR */
@@ -2683,8 +2711,10 @@ trb_find_td(dma_addr_t dma, struct xhci_ring *ring)
 
 		td_end = trb_to_rebased_pos(td->end_seg, td->end_trb, trbs_in_ring, deq);
 
-		if (ev > td_end)
+		if (ev > td_end) {
+			*passed_td = td;
 			continue;
+		}
 
 		td_start = trb_to_rebased_pos(td->start_seg, td->start_trb, trbs_in_ring, deq);
 
@@ -2709,6 +2739,7 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 	struct xhci_ring *ep_ring;
 	unsigned int slot_id;
 	int ep_index;
+	struct xhci_td *passed_td = NULL;
 	struct xhci_td *ev_td = NULL;
 	struct xhci_td *td = NULL;
 	dma_addr_t ep_trb_dma;
@@ -2716,7 +2747,6 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 	int status = -EINPROGRESS;
 	struct xhci_ep_ctx *ep_ctx;
 	u32 trb_comp_code;
-	bool ring_xrun_event = false;
 
 	slot_id = TRB_TO_SLOT_ID(le32_to_cpu(event->flags));
 	ep_index = TRB_TO_EP_ID(le32_to_cpu(event->flags)) - 1;
@@ -2742,16 +2772,51 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 	if (!ep_ring)
 		return handle_transferless_tx_event(xhci, ep, trb_comp_code);
 
-	/* find the transfer trb this events points to */
+	/* find the transfer trb and TD this event points to */
 	ep_trb = xhci_dma_to_trb(ep_ring->deq_seg, ep_trb_dma, NULL);
-	if (ep_trb)
-		ev_td = trb_find_td(ep_trb_dma, ep_ring);
 
-	/* Look for common error cases */
-	switch (trb_comp_code) {
-	/* Skip codes that require special handling depending on
-	 * transfer type
+	if (ep_trb)
+		ev_td = trb_find_td(ep_trb_dma, ep_ring, &passed_td);
+	else if (trb_comp_code == COMP_MISSED_SERVICE_ERROR) {
+		/*
+		 * xhci 1.0 Missed Service Error TRB pointer is 0. (!ep_trb)
+		 * A missed service event means at least one TD was skipped.
+		 */
+		passed_td = list_first_entry_or_null(&ep_ring->td_list,
+						     struct xhci_td, td_list);
+	}
+
+	/*
+	 * Give back any TDs passed before the TRB this event points to
+	 *
+	 * xhci 4.10.2 states isoc endpoints should continue processing the next
+	 * TD if there was an error mid TD. Host like NEC don't generate an
+	 * event for the last isoc TRB even if the IOC flag is set.
+	 * xhci 4.9.1 states that if there are errors in mult-TRB TDs xHC should
+	 * generate an error for that TRB, and if xHC proceeds to the next TD it
+	 * should genete an event for any TRB with IOC flag on the way.
+	 * Other host follow this. If
+	 *
+	 * We wait for the final IOC event, but if we get an event
+	 * anywhere outside this TD, just give the passed TDs already.
 	 */
+	if (passed_td) {
+		struct xhci_td *tmp_td;
+		list_for_each_entry_safe(td, tmp_td, &ep_ring->td_list, td_list)
+		{
+			xhci_dbg(xhci, "Giveback passed td\n");
+			/* MATHIAS FIXME Don't overwrite error_mid_td cases, if any? */
+			if (usb_endpoint_xfer_isoc(&td->urb->ep->desc))
+				skip_isoc_td(xhci, td);
+			xhci_dequeue_td(xhci, td, ep_ring, td->status);
+			if (td == passed_td)
+				break;
+		}
+	}
+
+	/* common completion codes, handle transfer specific types later */
+	switch (trb_comp_code) {
+
 	case COMP_SUCCESS:
 		if (EVENT_TRB_LEN(le32_to_cpu(event->transfer_len)) != 0) {
 			trb_comp_code = COMP_SHORT_PACKET;
@@ -2828,31 +2893,27 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 		 * Underrun Event for OUT Isoch endpoint.
 		 */
 		xhci_dbg(xhci, "Underrun event on slot %u ep %u\n", slot_id, ep_index);
-		ring_xrun_event = true;
-		break;
+		goto out_save_comp_code;
 	case COMP_RING_OVERRUN:
 		xhci_dbg(xhci, "Overrun event on slot %u ep %u\n", slot_id, ep_index);
-		ring_xrun_event = true;
-		break;
+		goto out_save_comp_code;
 	case COMP_MISSED_SERVICE_ERROR:
 		/*
-		 * When encounter missed service error, one or more isoc tds
-		 * may be missed by xHC.
-		 * Set skip flag of the ep_ring; Complete the missed tds as
-		 * short transfer when process the ep_ring next time.
+		 * xHC missed processing one or several isoc TDs, if ep_trb is
+		 * set then it points to the missed TD. if not (xHC 1.0) then
+		 * return here as we already gave back one TD as passed_td above
 		 */
-		ep->skip = true;
 		xhci_dbg(xhci,
-			 "Miss service interval error for slot %u ep %u, set skip flag%s\n",
-			 slot_id, ep_index, ep_trb_dma ? ", skip now" : "");
-		break;
+			 "Miss service interval error for slot %u ep %u\n",
+			 slot_id, ep_index);
+		if (ep_trb)
+			break;
+		goto out_save_comp_code;
 	case COMP_NO_PING_RESPONSE_ERROR:
-		ep->skip = true;
 		xhci_dbg(xhci,
 			 "No Ping response error for slot %u ep %u, Skip one Isoc TD\n",
 			 slot_id, ep_index);
-		return 0;
-
+		goto out_save_comp_code;
 	case COMP_INCOMPATIBLE_DEVICE_ERROR:
 		/* needs disable slot command to recover */
 		xhci_warn(xhci,
@@ -2868,153 +2929,25 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 		xhci_warn(xhci,
 			  "ERROR Unknown event condition %u for slot %u ep %u , HC probably busted\n",
 			  trb_comp_code, slot_id, ep_index);
-		if (ep->skip)
-			break;
-		return 0;
+		goto out_save_comp_code;
 	}
 
 	/*
-	 * xhci 4.10.2 states isoc endpoints should continue
-	 * processing the next TD if there was an error mid TD.
-	 * So host like NEC don't generate an event for the last
-	 * isoc TRB even if the IOC flag is set.
-	 * xhci 4.9.1 states that if there are errors in mult-TRB
-	 * TDs xHC should generate an error for that TRB, and if xHC
-	 * proceeds to the next TD it should genete an event for
-	 * any TRB with IOC flag on the way. Other host follow this.
-	 *
-	 * We wait for the final IOC event, but if we get an event
-	 * anywhere outside this TD, just give it back already.
+	 * MATHIAS FIXME cases:
+	 * COMP_NO_PING_RESPONSE used to set ep->skip
+	 * check when tracing sohuld be printed
 	 */
+
 	td = list_first_entry_or_null(&ep_ring->td_list, struct xhci_td, td_list);
 
-	if (td && td->error_mid_td && td != ev_td) {
-		xhci_dbg(xhci, "Missing TD completion event after mid TD error\n");
-		xhci_dequeue_td(xhci, td, ep_ring, td->status);
-	}
-
-	/* If the TRB pointer is NULL, missed TDs will be skipped on the next event */
-	if (trb_comp_code == COMP_MISSED_SERVICE_ERROR && !ep_trb_dma)
-		return 0;
-
-	if (list_empty(&ep_ring->td_list)) {
-		/*
-		 * Don't print wanings if ring is empty due to a stopped endpoint generating an
-		 * extra completion event if the device was suspended. Or, a event for the last TRB
-		 * of a short TD we already got a short event for. The short TD is already removed
-		 * from the TD list.
-		 */
-		if (trb_comp_code != COMP_STOPPED &&
-		    trb_comp_code != COMP_STOPPED_LENGTH_INVALID &&
-		    !ring_xrun_event &&
-		    !xhci_spurious_success_tx_event(xhci, ep_ring)) {
-			xhci_warn(xhci, "Event TRB for slot %u ep %u with no TDs queued\n",
-				  slot_id, ep_index);
-		}
-
-		ep->skip = false;
+	/* Event doesn't match a queued TD in list, or TD list is empty */
+	if (!ev_td || ev_td != td) {
+		debug_nomatch_tx_event(xhci, ep_ring, ep_trb, ep_trb_dma,
+				       trb_comp_code);
 		goto check_endpoint_halted;
 	}
-
-	do {
-		td = list_first_entry(&ep_ring->td_list, struct xhci_td,
-				      td_list);
-
-		/* Is this TRB not the currently executing TD? */
-		if (td != ev_td) {
-
-			if (ep->skip && usb_endpoint_xfer_isoc(&td->urb->ep->desc)) {
-				/* this event is unlikely to match any TD, don't skip them all */
-				if (trb_comp_code == COMP_STOPPED_LENGTH_INVALID)
-					return 0;
-
-				skip_isoc_td(xhci, td, ep, status);
-
-				if (!list_empty(&ep_ring->td_list)) {
-					if (ring_xrun_event) {
-						/*
-						 * If we are here, we are on xHCI 1.0 host with no
-						 * idea how many TDs were missed or where the xrun
-						 * occurred. New TDs may have been added after the
-						 * xrun, so skip only one TD to be safe.
-						 */
-						xhci_dbg(xhci, "Skipped one TD for slot %u ep %u",
-								slot_id, ep_index);
-						return 0;
-					}
-					continue;
-				}
-
-				xhci_dbg(xhci, "All TDs skipped for slot %u ep %u. Clear skip flag.\n",
-					 slot_id, ep_index);
-				ep->skip = false;
-				td = NULL;
-				goto check_endpoint_halted;
-			}
-
-			/* TD was queued after xrun, maybe xrun was on a link, don't panic yet */
-			if (ring_xrun_event)
-				return 0;
-
-			/*
-			 * Skip the Force Stopped Event. The 'ep_trb' of FSE is not in the current
-			 * TD pointed by 'ep_ring->dequeue' because that the hardware dequeue
-			 * pointer still at the previous TRB of the current TD. The previous TRB
-			 * maybe a Link TD or the last TRB of the previous TD. The command
-			 * completion handle will take care the rest.
-			 */
-			if (trb_comp_code == COMP_STOPPED ||
-			    trb_comp_code == COMP_STOPPED_LENGTH_INVALID) {
-				return 0;
-			}
-
-			/*
-			 * Some hosts give a spurious success event after a short
-			 * transfer or error on last TRB. Ignore it.
-			 */
-			if (xhci_spurious_success_tx_event(xhci, ep_ring)) {
-				xhci_dbg(xhci, "Spurious event dma %pad, comp_code %u after %u\n",
-					 &ep_trb_dma, trb_comp_code, ep_ring->old_trb_comp_code);
-				ep_ring->old_trb_comp_code = trb_comp_code;
-				return 0;
-			}
-
-			/* HC is busted, give up! */
-			goto debug_finding_td;
-		}
-
-		if (ep->skip) {
-			xhci_dbg(xhci,
-				 "Found td. Clear skip flag for slot %u ep %u.\n",
-				 slot_id, ep_index);
-			ep->skip = false;
-		}
-
-	/*
-	 * If ep->skip is set, it means there are missed tds on the
-	 * endpoint ring need to take care of.
-	 * Process them as short transfer until reach the td pointed by
-	 * the event.
-	 */
-	} while (ep->skip);
-
-	ep_ring->old_trb_comp_code = trb_comp_code;
-
-	/* Get out if a TD was queued at enqueue after the xrun occurred */
-	if (ring_xrun_event)
-		return 0;
 
 	trace_xhci_handle_transfer(ep_ring, (struct xhci_generic_trb *) ep_trb, ep_trb_dma);
-
-	/*
-	 * No-op TRB could trigger interrupts in a case where a URB was killed
-	 * and a STALL_ERROR happens right after the endpoint ring stopped.
-	 * Reset the halted endpoint. Otherwise, the endpoint remains stalled
-	 * indefinitely.
-	 */
-
-	if (trb_is_noop(ep_trb))
-		goto check_endpoint_halted;
 
 	td->status = status;
 
@@ -3025,21 +2958,19 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 		process_isoc_td(xhci, ep, ep_ring, td, ep_trb, event);
 	else
 		process_bulk_intr_td(xhci, ep, ep_ring, td, ep_trb, event);
+
+	/* MATHIAS FIXME the success -> short comp code mod case */
+	ep_ring->old_trb_comp_code = trb_comp_code;
+
 	return 0;
 
 check_endpoint_halted:
 	if (xhci_halted_host_endpoint(ep_ctx, trb_comp_code))
 		xhci_handle_halted_endpoint(xhci, ep, td, EP_HARD_RESET);
 
+out_save_comp_code:
+	ep_ring->old_trb_comp_code = trb_comp_code;
 	return 0;
-
-debug_finding_td:
-	xhci_err(xhci, "Event dma %pad for ep %d status %d not part of TD at %016llx - %016llx\n",
-		 &ep_trb_dma, ep_index, trb_comp_code,
-		 (unsigned long long)xhci_trb_virt_to_dma(td->start_seg, td->start_trb),
-		 (unsigned long long)xhci_trb_virt_to_dma(td->end_seg, td->end_trb));
-
-	return -ESHUTDOWN;
 
 err_out:
 	xhci_err(xhci, "@%016llx %08x %08x %08x %08x\n",
