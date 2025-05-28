@@ -649,6 +649,7 @@ static void xhci_dbc_stop(struct xhci_dbc *dbc)
 		mutex_unlock(&dbc->enable_mutex);
 		return;
 	case DS_CONFIGURED:
+		dbc->state = DS_DISABLING;
 		xhci_dbc_flush_requests(dbc);
 		spin_unlock(&dbc->lock);
 
@@ -656,6 +657,7 @@ static void xhci_dbc_stop(struct xhci_dbc *dbc)
 			dbc->driver->disconnect(dbc);
 		break;
 	default:
+		dbc->state = DS_DISABLING;
 		spin_unlock(&dbc->lock);
 		break;
 	}
@@ -831,25 +833,44 @@ static enum evtreturn xhci_dbc_do_handle_events(struct xhci_dbc *dbc)
 	/* DbC state machine: */
 	switch (dbc->state) {
 	case DS_DISABLED:
+	case DS_DISABLING:
 	case DS_INITIALIZED:
 
 		return EVT_ERR;
 	case DS_ENABLED:
 		portsc = readl(&dbc->regs->portsc);
+		ctrl = readl(&dbc->regs->control);
+
 		if (portsc & DBC_PORTSC_CONN_STATUS) {
+			dbc->conn_timestamp = jiffies;
 			dbc->state = DS_CONNECTED;
 			dev_info(dbc->dev, "DbC connected\n");
+		} else if (!(ctrl & DBC_CTRL_DBC_ENABLE)) {
+			dev_err(dbc->dev, "unexpected DbC disable, xHC reset?\n");
 		}
 
 		return EVT_DONE;
 	case DS_CONNECTED:
 		ctrl = readl(&dbc->regs->control);
+		portsc = readl(&dbc->regs->portsc);
 		if (ctrl & DBC_CTRL_DBC_RUN) {
 			dbc->state = DS_CONFIGURED;
 			dev_info(dbc->dev, "DbC configured\n");
-			portsc = readl(&dbc->regs->portsc);
 			writel(portsc, &dbc->regs->portsc);
 			return EVT_GSER;
+		}
+
+		if (!(portsc & DBC_PORTSC_CONN_STATUS)) {
+			/* covers DCE == 0 as it also sets CONN_STATUS to 0 */
+			dev_warn(dbc->dev, "DbC lost connection during enum\n");
+			dbc->state = DS_ENABLED;
+			return EVT_DONE;
+		} else if (time_is_before_jiffies(dbc->conn_timestamp +
+						  msecs_to_jiffies(500))) {
+			dev_err(dbc->dev, "DbC enum stuck\n");
+			dev_err(dbc->dev, "CTRL %x, PORTSC %x\n", ctrl, portsc);
+			/* hack to avoid a lot of dev_err() spam */
+			dbc->conn_timestamp = jiffies;
 		}
 
 		return EVT_DONE;

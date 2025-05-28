@@ -77,6 +77,7 @@ struct dbc_str_descs {
 
 enum dbc_state {
 	DS_DISABLED = 0,
+	DS_DISABLING,
 	DS_INITIALIZED,
 	DS_ENABLED,
 	DS_CONNECTED,
@@ -145,6 +146,7 @@ struct xhci_dbc {
 	struct delayed_work		event_work;
 	unsigned int			poll_interval;	/* ms */
 	unsigned long			xfer_timestamp;
+	unsigned long			conn_timestamp;
 	unsigned			resume_required:1;
 	struct dbc_ep			eps[2];
 
