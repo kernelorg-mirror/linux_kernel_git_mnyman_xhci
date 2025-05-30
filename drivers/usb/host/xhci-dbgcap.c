@@ -608,17 +608,6 @@ static int xhci_do_dbc_start(struct xhci_dbc *dbc)
 	return 0;
 }
 
-static int xhci_do_dbc_stop(struct xhci_dbc *dbc)
-{
-	if (dbc->state == DS_DISABLED)
-		return -EINVAL;
-
-	writel(0, &dbc->regs->control);
-	dbc->state = DS_DISABLED;
-
-	return 0;
-}
-
 static int xhci_dbc_start(struct xhci_dbc *dbc)
 {
 	int			ret;
@@ -628,31 +617,38 @@ static int xhci_dbc_start(struct xhci_dbc *dbc)
 
 	pm_runtime_get_sync(dbc->dev); /* note this was self.controller */
 
+	mutex_lock(&dbc->enable_mutex);
 	spin_lock_irqsave(&dbc->lock, flags);
 	ret = xhci_do_dbc_start(dbc);
 	spin_unlock_irqrestore(&dbc->lock, flags);
 
 	if (ret) {
+		mutex_unlock(&dbc->enable_mutex);
 		pm_runtime_put(dbc->dev); /* note this was self.controller */
 		return ret;
 	}
 
-	return mod_delayed_work(system_wq, &dbc->event_work,
-				msecs_to_jiffies(dbc->poll_interval));
+	ret = mod_delayed_work(system_wq, &dbc->event_work,
+			       msecs_to_jiffies(dbc->poll_interval));
+
+	mutex_unlock(&dbc->enable_mutex);
+	return ret;
 }
 
 static void xhci_dbc_stop(struct xhci_dbc *dbc)
 {
-	int ret;
 	unsigned long		flags;
 
 	WARN_ON(!dbc);
+	mutex_lock(&dbc->enable_mutex);
+	spin_lock(&dbc->lock);
 
 	switch (dbc->state) {
 	case DS_DISABLED:
+		spin_unlock(&dbc->lock);
+		mutex_unlock(&dbc->enable_mutex);
 		return;
 	case DS_CONFIGURED:
-		spin_lock(&dbc->lock);
 		xhci_dbc_flush_requests(dbc);
 		spin_unlock(&dbc->lock);
 
@@ -660,18 +656,19 @@ static void xhci_dbc_stop(struct xhci_dbc *dbc)
 			dbc->driver->disconnect(dbc);
 		break;
 	default:
+		spin_unlock(&dbc->lock);
 		break;
 	}
 
 	cancel_delayed_work_sync(&dbc->event_work);
 
 	spin_lock_irqsave(&dbc->lock, flags);
-	ret = xhci_do_dbc_stop(dbc);
+	writel(0, &dbc->regs->control);
+	dbc->state = DS_DISABLED;
 	spin_unlock_irqrestore(&dbc->lock, flags);
-	if (ret)
-		return;
 
 	xhci_dbc_mem_cleanup(dbc);
+	mutex_unlock(&dbc->enable_mutex);
 	pm_runtime_put_sync(dbc->dev); /* note, was self.controller */
 }
 
@@ -1279,6 +1276,7 @@ xhci_alloc_dbc(struct device *dev, void __iomem *base, const struct dbc_driver *
 
 	INIT_DELAYED_WORK(&dbc->event_work, xhci_dbc_handle_events);
 	spin_lock_init(&dbc->lock);
+	mutex_init(&dbc->enable_mutex);
 
 	ret = sysfs_create_groups(&dev->kobj, dbc_dev_groups);
 	if (ret)
