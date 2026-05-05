@@ -1499,6 +1499,7 @@ int xhci_endpoint_init(struct xhci_hcd *xhci,
 		return -ENOMEM;
 
 	virt_dev->eps[ep_index].skip = false;
+	virt_dev->eps[ep_index].next_uframe = -1;
 	ep_ring = virt_dev->eps[ep_index].new_ring;
 	xhci_ring_init(xhci, ep_ring);
 
