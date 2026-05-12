@@ -949,6 +949,34 @@ static bool xhci_pending_portevent(struct xhci_hcd *xhci)
 	return false;
 }
 
+static void xhci_dump_ring(struct xhci_hcd *xhci, struct xhci_ring *ring)
+{
+	struct xhci_segment	*seg;
+	union xhci_trb		*trb;
+	dma_addr_t		dma;
+	char			str[XHCI_MSG_MAX];
+	int			i, j;
+
+	seg = ring->first_seg;
+	dma =  xhci_trb_virt_to_dma(ring->deq_seg, ring->dequeue);
+
+        xhci_err(xhci, "Dequeue: %pad\n", &dma);
+
+	for (i = 0; i < ring->num_segs; i++) {
+		for (j = 0; j < TRBS_PER_SEGMENT; j++) {
+			trb = &seg->trbs[j];
+			dma = seg->dma + j * sizeof(*trb);
+			xhci_err(xhci, "%pad: %s\n", &dma,
+				 xhci_decode_trb(str, XHCI_MSG_MAX,
+						 le32_to_cpu(trb->generic.field[0]),
+						 le32_to_cpu(trb->generic.field[1]),
+						 le32_to_cpu(trb->generic.field[2]),
+						 le32_to_cpu(trb->generic.field[3])));
+		}
+		seg = seg->next;
+	}
+}
+
 /*
  * Stop HC (not bus-specific)
  *
@@ -998,6 +1026,12 @@ int xhci_suspend(struct xhci_hcd *xhci, bool do_wakeup)
 		clear_bit(HCD_FLAG_HW_ACCESSIBLE, &xhci->shared_hcd->flags);
 	/* step 1: stop endpoint */
 	/* skipped assuming that port suspend has done */
+
+	/* Check if command ring is empty */
+	if (!list_empty(&xhci->cmd_list)) {
+		xhci_err(xhci, "Suspending and stopping xHC with pending command(s)!!!\n");
+		xhci_dump_ring(xhci, xhci->cmd_ring);
+	}
 
 	/* step 2: clear Run/Stop bit */
 	command = readl(&xhci->op_regs->command);
