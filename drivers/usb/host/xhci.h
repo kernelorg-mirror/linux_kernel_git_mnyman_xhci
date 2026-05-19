@@ -702,6 +702,7 @@ struct xhci_virt_ep {
 	unsigned long		stop_time;
 	/* Isoch Frame ID checking storage */
 	int			next_uframe;
+	bool			last_td_used_sia;
 	/* Use new Isoch TRB layout needed for extended TBC support */
 	bool			use_extended_tbc;
 	/* set if this endpoint is controlled via sideband access*/

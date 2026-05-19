@@ -2624,6 +2624,40 @@ static bool xhci_spurious_success_tx_event(struct xhci_hcd *xhci,
 		return false;
 	}
 }
+/* called for isoc enpoints to handle overrun and underrun transfer events */
+static int handle_tx_event_overunderrun(struct xhci_virt_ep *ep)
+{
+	struct xhci_td *td;
+	struct urb *urb;
+	u32 uinterval;
+
+	/* don't touch ep->next_uframe and urb->start_frame if CFC frame sync is used */
+	if (!ep->last_td_used_sia)
+		return 0;   // what about skip??
+
+	/* re-calculate urb->start_frame on next urb enqueue */
+	if (list_empty(&ep->ring->td_list)) {
+		ep->next_uframe = -2; // FIXME define something, or use suitable -EXXX
+		ep->skip = false;  // maybe, or is it the wrong place?
+		return 0;
+	}
+
+	/* ep has tds, but queued late for its ESIT, adjust start_frame and next_uframe */
+	/* FIXME may have several URBs queued (unlikely) */
+	td = list_first_entry(&ep->ring->td_list, struct xhci_td, td_list);
+	urb = td->urb;
+	uinterval = urb->interval;
+
+	if (urb->dev->speed == USB_SPEED_LOW || urb->dev->speed == USB_SPEED_FULL)
+		uinterval *= 8;
+
+	ep->next_uframe += uinterval;
+	urb->start_frame += urb->interval;
+
+	return 0;
+	/* FIXME: ep_ring->old_trb_comp_code = trb_comp_code; */
+	/* FIXME: if (ep->skip) */
+}
 
 /*
  * If this function returns an error condition, it means it got a Transfer
@@ -2644,7 +2678,6 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 	int status = -EINPROGRESS;
 	struct xhci_ep_ctx *ep_ctx;
 	u32 trb_comp_code;
-	bool ring_xrun_event = false;
 
 	slot_id = TRB_TO_SLOT_ID(le32_to_cpu(event->flags));
 	ep_index = TRB_TO_EP_ID(le32_to_cpu(event->flags)) - 1;
@@ -2754,11 +2787,9 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 		 * Underrun Event for OUT Isoch endpoint.
 		 */
 		xhci_dbg(xhci, "Underrun event on slot %u ep %u\n", slot_id, ep_index);
-		ring_xrun_event = true;
 		break;
 	case COMP_RING_OVERRUN:
 		xhci_dbg(xhci, "Overrun event on slot %u ep %u\n", slot_id, ep_index);
-		ring_xrun_event = true;
 		break;
 	case COMP_MISSED_SERVICE_ERROR:
 		/*
@@ -2823,6 +2854,9 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 	if (trb_comp_code == COMP_MISSED_SERVICE_ERROR && !ep_trb_dma)
 		return 0;
 
+	if (trb_comp_code == COMP_RING_UNDERRUN || trb_comp_code == COMP_RING_OVERRUN)
+		return handle_tx_event_overunderrun(ep);
+
 	if (list_empty(&ep_ring->td_list)) {
 		/*
 		 * Don't print wanings if ring is empty due to a stopped endpoint generating an
@@ -2832,7 +2866,6 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 		 */
 		if (trb_comp_code != COMP_STOPPED &&
 		    trb_comp_code != COMP_STOPPED_LENGTH_INVALID &&
-		    !ring_xrun_event &&
 		    !xhci_spurious_success_tx_event(xhci, ep_ring)) {
 			xhci_warn(xhci, "Event TRB for slot %u ep %u with no TDs queued\n",
 				  slot_id, ep_index);
@@ -2856,20 +2889,8 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 
 				skip_isoc_td(xhci, td, ep, status);
 
-				if (!list_empty(&ep_ring->td_list)) {
-					if (ring_xrun_event) {
-						/*
-						 * If we are here, we are on xHCI 1.0 host with no
-						 * idea how many TDs were missed or where the xrun
-						 * occurred. New TDs may have been added after the
-						 * xrun, so skip only one TD to be safe.
-						 */
-						xhci_dbg(xhci, "Skipped one TD for slot %u ep %u",
-								slot_id, ep_index);
-						return 0;
-					}
+				if (!list_empty(&ep_ring->td_list))
 					continue;
-				}
 
 				xhci_dbg(xhci, "All TDs skipped for slot %u ep %u. Clear skip flag.\n",
 					 slot_id, ep_index);
@@ -2877,10 +2898,6 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 				td = NULL;
 				goto check_endpoint_halted;
 			}
-
-			/* TD was queued after xrun, maybe xrun was on a link, don't panic yet */
-			if (ring_xrun_event)
-				return 0;
 
 			/*
 			 * Skip the Force Stopped Event. The 'ep_trb' of FSE is not in the current
@@ -2925,10 +2942,6 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 	} while (ep->skip);
 
 	ep_ring->old_trb_comp_code = trb_comp_code;
-
-	/* Get out if a TD was queued at enqueue after the xrun occurred */
-	if (ring_xrun_event)
-		return 0;
 
 	trace_xhci_handle_transfer(ep_ring, (struct xhci_generic_trb *) ep_trb, ep_trb_dma);
 
@@ -4042,11 +4055,14 @@ static int xhci_get_isoc_start_frame(struct xhci_hcd *xhci, struct urb *urb,
 
 	// FIXME, used to check if !list_empty(&ep_ring->td_list)), is that reliable
 
-	/* Is this the first URB starting the whole isoc transfer */
+	/*  first URB starting the whole isoc transfer, or restart after over/under-run */
 	if (ep->next_uframe < 0) {
-		/* align first URB to next interval boundary, or at last to full frame */
-		start_uframe = mfindex + ist + XHCI_CFC_DELAY;
-		start_uframe = roundup(start_uframe, 8);
+		start_uframe = mfindex + ist;
+		/* if first URB then add additinal delay and align to full frame */
+		if (ep->next_uframe == -1) {
+			start_uframe += XHCI_CFC_DELAY;
+			start_uframe = roundup(start_uframe, 8);
+		}
 		start_uframe = roundup(start_uframe, uinterval) % MAX_UFRAMES;
 	} else {
 		/* URB is mid stream and expected to handle the next frame */
@@ -4166,8 +4182,10 @@ static int xhci_queue_isoc_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 		if (xhci_isoc_td_uses_frame_id(xhci, urb, xep, i)) {
 			sia_frame_id = (start_uframe + i * uinterval) / 8;
 			sia_frame_id = TRB_FRAME_ID(sia_frame_id % MAX_FRAMES);
+			xep->last_td_used_sia = false;
 		} else {
 			sia_frame_id = TRB_SIA;
+			xep->last_td_used_sia = true;
 		}
 
 		/*
