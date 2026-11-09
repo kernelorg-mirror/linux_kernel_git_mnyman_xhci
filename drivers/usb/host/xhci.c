@@ -1514,6 +1514,14 @@ static int xhci_check_args(struct usb_hcd *hcd, struct usb_device *udev,
 	}
 
 	xhci = hcd_to_xhci(hcd);
+
+	/*
+	 * Check halted before touching virt devices. Resume halts the host and
+	 * frees all virt devices without xhci->lock if it needs to be reset.
+	 */
+	if (xhci->xhc_state & XHCI_STATE_HALTED)
+		return -ENODEV;
+
 	if (check_virt_dev) {
 		if (!udev->slot_id || !xhci->devs[udev->slot_id]) {
 			xhci_dbg(xhci, "xHCI %s called with unaddressed device\n",
@@ -1528,9 +1536,6 @@ static int xhci_check_args(struct usb_hcd *hcd, struct usb_device *udev,
 			return -EINVAL;
 		}
 	}
-
-	if (xhci->xhc_state & XHCI_STATE_HALTED)
-		return -ENODEV;
 
 	return 1;
 }
@@ -4132,7 +4137,14 @@ static void xhci_free_dev(struct usb_hcd *hcd, struct usb_device *udev)
 	if (ret <= 0 && ret != -ENODEV)
 		return;
 
+	/* Halted host returns -ENODEV before virt device is checked */
+	if (!udev->slot_id || !xhci->devs[udev->slot_id])
+		return;
+
 	virt_dev = xhci->devs[udev->slot_id];
+	if (virt_dev->udev != udev)
+		return;
+
 	slot_ctx = xhci_get_slot_ctx(xhci, virt_dev->out_ctx);
 	trace_xhci_free_dev(slot_ctx);
 
